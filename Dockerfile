@@ -2,7 +2,7 @@ FROM centos:7
 MAINTAINER SharxDC
 
 COPY *.repo /etc/yum.repos.d/
-
+#needed to sopy sp
 COPY storpool /root/storpool
 
 RUN yum -y update && yum clean all && \
