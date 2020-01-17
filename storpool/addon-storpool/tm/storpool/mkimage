@@ -1,0 +1,145 @@
+#!/bin/bash
+
+# -------------------------------------------------------------------------- #
+# Copyright 2015-2020, StorPool (storpool.com)                               #
+#                                                                            #
+# Portions copyright OpenNebula Project (OpenNebula.org), CG12 Labs          #
+#                                                                            #
+# Licensed under the Apache License, Version 2.0 (the "License"); you may    #
+# not use this file except in compliance with the License. You may obtain    #
+# a copy of the License at                                                   #
+#                                                                            #
+# http://www.apache.org/licenses/LICENSE-2.0                                 #
+#                                                                            #
+# Unless required by applicable law or agreed to in writing, software        #
+# distributed under the License is distributed on an "AS IS" BASIS,          #
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   #
+# See the License for the specific language governing permissions and        #
+# limitations under the License.                                             #
+#--------------------------------------------------------------------------- #
+
+# mkimage size format host:remote_system_ds/disk.i vmid dsid
+#   - size in MB of the image
+#   - format for the image
+#   - host is the target host to deploy the VM
+#   - remote_system_ds is the path for the system datastore in the host
+#   - vmid is the id of the VM
+#   - dsid is the target datastore (0 is the system datastore)
+
+#-------------------------------------------------------------------------------
+# Get mkimage arguments from OpenNebula core
+#-------------------------------------------------------------------------------
+
+SIZE="$1"
+FSTYPE="$2"
+DST="$3"
+VM_ID="$4"
+DS_ID="$5"
+
+TM_PATH="$(dirname $0)"
+source "${TM_PATH}/storpool_common.sh"
+
+source "${TM_PATH}/../../datastore/libfs.sh"
+
+splog "SIZE=$SIZE FSTYPE=$FSTYPE DST=$DST VM_ID=$VM_ID DS_ID=$DS_ID"
+
+if [ "${FSTYPE,,}" != "raw" ] && [ "${FSTYPE,,}" != "swap" ]; then
+    log_error "Unsupported FSTYPE '$FSTYPE'! Please use 'raw'."
+    splog "Unsupported FSTYPE '$FSTYPE'! Please use 'raw'."
+    exit 1
+fi
+
+#-------------------------------------------------------------------------------
+# Get template information from datastore TEMPLATE definition
+#-------------------------------------------------------------------------------
+
+oneDatastoreInfo "$DS_ID"
+
+if boolTrue "AUTO_TEMPLATE"; then
+    if [ "$SP_PLACEALL" = "" ]; then
+        error_message "The template of the datastore with ID $DS_ID is missing 'SP_PLACEALL' attribute."
+        exit -1
+    fi
+    if [ "$SP_PLACETAIL" = "" ]; then
+        SP_PLACETAIL="$SP_PLACEALL"
+    fi
+    if [ -n "${SP_REPLICATION/[123]/}" ] || [ -n "${SP_REPLICATION/[[:digit:]]/}" ]; then
+        error_message "The template of the datastore with ID $DS_ID is with unknown value for 'SP_REPLICATION' attribute (SP_REPLICATION=$SP_REPLICATION)."
+        exit -1
+    fi
+fi
+
+#-------------------------------------------------------------------------------
+# Set dst path and dirs
+#-------------------------------------------------------------------------------
+
+DST_PATH=`arg_path $DST`
+DST_HOST=`arg_host $DST`
+DST_DIR=`dirname $DST_PATH`
+
+DISK_ID=$(echo $DST | awk -F. '{print $NF}')
+
+oneVmInfo "$VM_ID" "$DISK_ID"
+
+if [ -n "$DRIVER" ] && [ "${DRIVER,,}" != "raw" ]; then
+    log_error "Unsupported DRIVER format '$DRIVER'! Please use 'raw'."
+    splog "Unsupported DRIVER format '$DRIVER'! Please use 'raw'."
+    exit 1
+fi
+
+#-------------------------------------------------------------------------------
+# Create image
+#-------------------------------------------------------------------------------
+
+SP_SIZE="${SIZE}M"
+SP_VOL="${ONE_PX}-sys-${VM_ID}-${DISK_ID}-${FSTYPE}"
+SP_LINK="/dev/storpool/$SP_VOL"
+SP_TEMPLATE="${ONE_PX}-ds-$DS_ID"
+
+storpoolTemplate "$SP_TEMPLATE"
+
+storpoolVolumeCreate "$SP_VOL" "$SIZE"M "$SP_TEMPLATE"
+
+if [ "${FSTYPE,,}" != "raw" ]; then
+    if [ "$FSTYPE" = "swap" ]; then
+        MKFS_CMD="$MKSWAP -L swap \"$SP_LINK\""
+    else
+        MKFS_CMD=`mkfs_command "$SP_LINK" "$FSTYPE" "$SIZE"`
+    fi
+
+    trapAdd "splog \"return \$? \"; storpoolVolumeDetach \"$SP_VOL\" \"force\" \"\" \"all\"; storpoolVolumeDelete \"$SP_VOL\" force snaps"
+
+    if [ -n "$BRIDGE_LIST" ]; then
+        splog "BRIDGE_LIST:$BRIDGE_LIST"
+        R_HOST=`get_destination_host $VM_ID`
+        storpoolVolumeAttach "$SP_VOL" "$R_HOST"
+
+        splog "run on $R_HOST $MKFS_CMD"
+        ssh_exec_and_log "$R_HOST" "$MKFS_CMD" \
+           "Error running $MKFS_CMD on $R_HOST"
+    else
+        storpoolVolumeAttach "$SP_VOL"
+
+        splog "run $MKFS_CMD"
+        exec_and_log "$MKFS_CMD" \
+           "Error running $MKFS_CMD"
+    fi
+
+    trapReset
+
+    storpoolVolumeDetach "$SP_VOL" "force" "" "all"
+fi
+
+storpoolVolumeAttach "$SP_VOL" "$DST_HOST"
+
+storpoolVolumeTag "$SP_VOL" "$VM_ID"
+
+MONITOR_TM_MAD=
+if ! boolTrue "DS_SHARED" || [ "${SP_SYSTEM^^}" = "SSH" ]; then
+    MONITOR_TM_MAD="storpool"
+fi
+
+oneSymlink "$DST_HOST" "$SP_LINK" "$DST_PATH"
+
+splog "END $VM_ID"
+exit 0

@@ -1,0 +1,140 @@
+MKFS="sudo /sbin/mkfs"
+MKSWAP="sudo /sbin/mkswap"
+
+# Prefix for the OpenNebula instance in StorPool
+# Set to a different name to avoid naming collision when multiple OpenNebula
+# instances are using single StorPool storage
+# default: "one"
+#ONE_PX="one"
+
+# (obsolete)there is a code in the addon to manage the attributes of the
+# StorPool templates which represent the OpenNebula datastores
+#
+# The new polisy is to setup the datastore attributes using the storpool CLI
+#
+# Set to '1' to enable the template management via the datastore templates.
+#
+# Default: 0 (disabled)
+#AUTO_TEMPLATE=0
+
+# (obsolete)
+# Global option to manage template propagate
+#
+# Default: 1 (enabled)
+#SP_TEMPLATE_PROPAGATE=1
+
+# Run stats collecting only on the LEADER instance
+# If autodetction fails set the leader IP manually
+# Or to administratively disable set to 'disabled'
+#
+# Default: '' (autodetect)
+#RAFT_LEADER_IP=
+
+#(Experimental)
+#
+# save VM checkpoint file to a StorPool volume
+#SP_CHECKPOINT=yes
+#
+# Do not store the VM checkpoint on migrate
+#SP_CHECKPOINT=nomigrate
+
+
+# Save VM checkpoint file on a StorPool volume
+# To enable set to '1'
+# Default: 0 (disabled)
+#SP_CHECKPOINT_BD=0
+
+# (Experimental)
+# Code that overrides the VM snapshot interface creating atomic or in
+# single fsfreeze call snapshots of all VM disks.
+#
+# uncoment and add to VM_MAD attributes:
+# `-l snapshotcreate=snapshot_create-storpool,snapshotdelete=snapshot_delete-storpool,snapshotrevert=snapshot_revert-storpool`
+#
+# Do fsfreeze/fsthaw during VM snapshot
+#
+VMSNAPSHOT_FSFREEZE=0
+
+# Delete VM snapshots on VM terminate
+# Snampshots should be manually deleted when disabled
+#
+VMSNAPSHOT_DELETE_ON_TERMINATE=1
+
+# Add quota to the count of VM snapshots
+# the limit is set as a number with the VMSNAPSHOT_LIMIT
+# custom attribute attributevariable in the SYSTEM datastore
+#
+VMSNAPSHOT_ENABLE_LIMIT=1
+
+# Change DEV_PREFIX on imported images
+# Uncomment to enable
+#
+#DS_CP_FORCE_DEV_PREFIX=sd
+
+# OpenNebula RPC endpoint
+# Uncomment and edit when the default does not works
+#export ONE_XMLRPC=http://localhost:2633/RPC2
+# alternatively create a file '~oneadmin/.one/one_endpoint' containig the endpoint details
+
+# Tag all VM disks with tag $VM_TAG=$VM_ID
+# Empty string will disable the tagging
+# Default: nvm
+#
+#VM_TAG=nvm
+
+# Optional common arguments to OpenNebula shell tools
+#ONE_ARGS=
+
+# during image import OpenNebula 5.6+ do exclusive lock on the image resource
+# which prevent Image Template manipulation
+# Default: 1 (enabled)
+#
+UPDATE_IMAGE_ON_IMPORT=1
+
+#
+# variables enabling various Debuging
+#
+# (obsolete)
+#POLL_DISK_INFO_DEBUG=1
+
+# tm/storpool_common.sh
+#DEBUG_COMMON=1
+#DEBUG_SP_RUN_CMD=1
+#DEBUG_SP_RUN_CMD_VERBOSE=1
+
+# datastore/monitor_helper-sync
+#MONITOR_SYNC_DEBUG=1
+#MONITOR_SYNC_DEBUG_VERBOSE=1
+
+# datastore/monitor
+#DEBUG_DS_MONITOR=1
+#DEBUG_DS_MONITOR_VERBOSE=1
+
+# tm/monitor
+#DEBUG_TM_MONITOR=1
+#DEBUG_TM_MONITOR_VERBOSE=1
+
+# tm/monitor_ds
+#DEBUG_TM_MONITOR_DS=1
+#DEBUG_TM_MONITOR_DS_VERBOSE=1
+
+# tm/monitor_disk
+#DEBUG_TM_MONITOR_DISK=1
+#DEBUG_TM_MONITOR_DISK_VERBOSE=1
+
+# tm/monitor_disk-misc
+#DEBUG_TM_MONITOR_DISK_MISC=1
+#DEBUG_TM_MONITOR_DISK_MISC_VERBOSE=1
+
+# datastore/monitor_ds.sh (sets DEBUG_TM_MONITOR_DS=1)
+#IM_MONITOR_DS_DEBUG=1
+#IM_MONITOR_DS_DEBUG_VERBOSE=1
+
+# tm/storpool_common.sh (verbosity per funcion)
+#DEBUG_oneDsDriverAction=1
+#DEBUG_oneDsInfo=1
+#DEBUG_oneVmInfo=1
+#DEBUG_oneTemplateInfo=1
+#DEBUG_oneHostInfo=1
+#DEBUG_oneDatastoreInfo=1
+#DEBUG_oneVmVolumes=1

@@ -1,0 +1,176 @@
+#!/bin/bash
+#
+# -------------------------------------------------------------------------- #
+# Copyright 2015-2020, StorPool (storpool.com)                               #
+#                                                                            #
+# Licensed under the Apache License, Version 2.0 (the "License"); you may    #
+# not use this file except in compliance with the License. You may obtain    #
+# a copy of the License at                                                   #
+#                                                                            #
+# http://www.apache.org/licenses/LICENSE-2.0                                 #
+#                                                                            #
+# Unless required by applicable law or agreed to in writing, software        #
+# distributed under the License is distributed on an "AS IS" BASIS,          #
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   #
+# See the License for the specific language governing permissions and        #
+# limitations under the License.                                             #
+#--------------------------------------------------------------------------- #
+#
+
+# configure in /etc/one/oned.conf
+#```
+#VM_HOOK = [
+#    name      = "net_fw_hook",
+#    on        = "CUSTOM",
+#    state     = "ACTIVE",
+#    lcm_state = "HOTPLUG_NIC",
+#    command   = "net_fw_hook",
+#    remote    = "YES",
+#    arguments = "-i $TEMPLATE" ]
+#```
+# Note that the example is using a patched HM_MAD.
+# The patch could be found in _patches/mads/5.8.1/one_hm_rb.patch_
+# To use with the upstream HM_MAD pass $TEMPLATE without '-i' argument.
+
+# Any non-empty string will trigger the debug logging
+#DEBUG=1
+
+me=${0##*/}
+CWD="$(dirname "$0")"
+
+tmpb64="$(mktemp -t net_hook_XXXXXX)"
+trap 'rm -f "$tmpb64"' EXIT QUIT TERM HUP
+if [ ! -t 0 ]; then
+    cat > "$tmpb64"
+fi
+if [ ! -s "$tmpb64" ]; then
+    echo "$1" > "$tmpb64"
+fi
+
+XPATH="$CWD/../datastore/xpath.rb"
+ts="$(date +%s)"
+
+if [ -n "$DEBUG" ]; then
+    base64 -d "$tmpb64" | xmllint --format - >"/tmp/${me}-${ts}.xml"
+    sudo ipset save >"/tmp/${me}-${ts}.ipset"
+fi
+
+ALIAS_XPATH="/VM/TEMPLATE/NIC_ALIAS[ATTACH=\"YES\"]"
+unset i XE
+while IFS= read -r -d '' element;do
+    XE[i++]="$element"
+done < <(base64 -d "$tmpb64" | $XPATH --stdin \
+   /VM/ID \
+   $ALIAS_XPATH/ALIAS_ID \
+   $ALIAS_XPATH/IP \
+   $ALIAS_XPATH/IP6_GLOBAL \
+   $ALIAS_XPATH/IP6_LINK \
+   $ALIAS_XPATH/NAME \
+   $ALIAS_XPATH/PARENT_ID \
+)
+unset i
+VM_ID="${XE[i++]}"
+A_ID="${XE[i++]}"
+A_IP="${XE[i++]}"
+A_IP6_GLOBAL="${XE[i++]}"
+A_IP6_LINK="${XE[i++]}"
+A_NAME="${XE[i++]}"
+A_PARENT_ID="${XE[i++]}"
+
+if [ -z "$A_IP" ] && [ -z "$A_IP6_GLOBAL" ]; then
+    logger -t "$me" -- "No alias IP. exit 0"
+    exit 0
+fi
+
+# Get primary interface info
+unset i XE
+NIC_XPATH="/VM/TEMPLATE/NIC[NIC_ID=\"$A_PARENT_ID\"]"
+while IFS= read -r -d '' element;do
+    XE[i++]="$element"
+done < <(base64 -d "$tmpb64" | $XPATH --stdin \
+   $NIC_XPATH/IP \
+   $NIC_XPATH/VN_MAD \
+   $NIC_XPATH/ALIAS_IDS \
+   $NIC_XPATH/FILTER_IP_SPOOFING \
+)
+unset i
+NIC_IP="${XE[i++]}"
+NIC_VN_MAD="${XE[i++]}"
+NIC_ALIAS_IDS="${XE[i++]}"
+NIC_FILTER_IP_SPOOFING="${XE[i++]}"
+
+if [ "${NIC_FILTER_IP_SPOOFING^^}" != "YES"  ]; then
+    logger -t "$me" -- "NIC FILTER_IP_SPOOFING not 'YES' but '$NIC_FILTER_IP_SPOOFING'. Exit 0"
+    exit 0
+fi
+if [ -n "$DEBUG" ]; then
+    logger -t "$me" -- "NIC [IP=$NIC_IP, VN_MAD=$NIC_VN_MAD, ALIAS_IDS='$NIC_ALIAS_IDS', FILTER_IP_SPOOFING='$NIC_FILTER_IP_SPOOFING']"
+fi
+
+A_IDX="${A_NAME#*ALIAS}"
+
+attach=
+for idx in ${NIC_ALIAS_IDS//,/ }; do
+    if [ -n "$DEBUG" ]; then
+        logger -t "$me" -- "idx:$idx A_IDX:$A_IDX"
+    fi
+    if [ "$idx" = "$A_IDX" ]; then
+        attach=1
+    fi
+done
+
+chain="one-${VM_ID}-${A_PARENT_ID}-ip-spoofing"
+chain6="one-${VM_ID}-${A_PARENT_ID}-ip6-spoofing"
+
+if [ -n "$attach" ]; then
+    # alias add - ADD ipset IPv4
+    if [ -n "$A_IP" ]; then
+        sudo ipset -exist add "$chain" "$A_IP"
+        ret=$?
+        if [ $ret -ne 0 ]; then
+            logger -t "$me" -- "VM $VM_ID NIC_ALIAS[ID=$A_ID, IP=$A_IP, PARENT=$A_PARENT_ID] ipset ADD failed ($ret)"
+            sudo ipset save | grep "$chain" >"/tmp/${me}-${ts}-${chain}.ADD"
+        elif [ -n "$DEBUG" ]; then
+            logger -t "$me" -- "VM $VM_ID add $chain $A_IP ($ret)"
+        fi
+    fi
+
+    # alias add - ADD ipset IPv6
+    if [ -n "$A_IP6_GLOBAL" ]; then
+        sudo ipset -exist add "$chain6" "$A_IP6_GLOBAL"
+        ret=$?
+        if [ $ret -ne 0 ]; then
+            logger -t "$me" -- "VM $VM_ID NIC_ALIAS[ID=$A_ID, IP=$A_IP6_GLOBAL, PARENT=$A_PARENT_ID] ipset ADD failed ($ret)"
+            sudo ipset save | grep "$chain6" >"/tmp/${me}-${ts}-${chain6}.ADD"
+        elif [ -n "$DEBUG" ]; then
+            logger -t "$me" -- "VM $VM_ID add $chain6 $A_IP6_GLOBAL ($ret)"
+        fi
+        sudo ipset -exist add "$chain6" "$A_IP6_LINK"
+    fi
+else
+    # alias deleted - DEL ipset IPv4
+    if [ -n "$A_IP" ]; then
+        sudo ipset -exist del "$chain" "$A_IP"
+        ret=$?
+        if [ $ret -ne 0 ]; then
+            logger -t "$me" -- "VM $VM_ID NIC_ALIAS[ID=$A_ID, IP=$A_IP, PARENT_ID=$A_PARENT_ID] ipset DEL failed ($ret)"
+            sudo ipset save |grep "$chain" >"/tmp/${me}-${ts}-${chain}.DEL"
+        elif [ -n "$DEBUG" ]; then
+            logger -t "$me" -- "VM $VM_ID del $chain $A_IP ($ret)"
+        fi
+    fi
+
+    # alias deleted - DEL ipset IPv6
+    if [ -n "$A_IP6_GLOBAL" ]; then
+        sudo ipset -exist del "$chain6" "$A_IP6_GLOBAL"
+        ret=$?
+        if [ $ret -ne 0 ]; then
+            logger -t "$me" -- "VM $VM_ID NIC_ALIAS[ID=$A_ID, IP=$A_IP6_GLOBAL, PARENT_ID=$A_PARENT_ID] ipset DEL failed ($ret)"
+            sudo ipset save |grep "$chain6" >"/tmp/${me}-${ts}-${chain6}.DEL"
+        elif [ -n "$DEBUG" ]; then
+            logger -t "$me" -- "VM $VM_ID del $chain6 $A_IP6_GLOBAL ($ret)"
+        fi
+        sudo ipset -exist del "$chain6" "$A_IP6_LINK"
+    fi
+fi
+exit 0

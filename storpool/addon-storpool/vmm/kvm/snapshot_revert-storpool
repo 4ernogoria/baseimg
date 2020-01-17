@@ -1,0 +1,120 @@
+#!/bin/bash
+
+# -------------------------------------------------------------------------- #
+# Copyright 2015-2020, StorPool (storpool.com)                               #
+#                                                                            #
+# Portions copyright OpenNebula Project (OpenNebula.org), CG12 Labs          #
+#                                                                            #
+# Licensed under the Apache License, Version 2.0 (the "License"); you may    #
+# not use this file except in compliance with the License. You may obtain    #
+# a copy of the License at                                                   #
+#                                                                            #
+# http://www.apache.org/licenses/LICENSE-2.0                                 #
+#                                                                            #
+# Unless required by applicable law or agreed to in writing, software        #
+# distributed under the License is distributed on an "AS IS" BASIS,          #
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   #
+# See the License for the specific language governing permissions and        #
+# limitations under the License.                                             #
+#--------------------------------------------------------------------------- #
+
+#-------------------------------------------------------------------------------
+# snapshot_revert  domain snap_id vm_id vmhost
+#-------------------------------------------------------------------------------
+
+#-------------------------------------------------------------------------------
+# Get snapshot_revert arguments from OpenNebula core
+#-------------------------------------------------------------------------------
+
+DOMAIN="$1"
+SNAP_ID="$2"
+VM_ID="$3"
+VMHOST="$4"
+
+DRIVER_PATH="$(dirname $0)"
+VMSNAPSHOT_TAG="ONESNAP"
+VMSNAPSHOT_OVERRIDE=1
+DS_PATH="/var/lib/one/datastores"
+
+[ -f "${DRIVER_PATH}/../../etc/vmm/kvm/kvmrc" ] && source "${DRIVER_PATH}/../../etc/vmm/kvm/kvmrc" || source "${DRIVER_PATH}/kvmrc"
+source "${DRIVER_PATH}/../../scripts_common.sh"
+source "${DRIVER_PATH}/../../tm/storpool/storpool_common.sh"
+
+LOG_PREFIX="vmm"
+
+if boolTrue "DEBUG_VMSNAPSHOT"; then
+    splog "$0 $*"
+fi
+
+if boolTrue "VMSNAPSHOT_OVERRIDE"; then
+    oneVmVolumes "$VM_ID"
+    declare -A vmVolumesMap
+    for disk in $vmDisksMap; do
+        vmVolumesMap["${disk%:*}"]="${disk##*:}"
+    done
+    rCMD=$(cat <<EOF
+    [ -f "/var/tmp/one/etc/vmm/kvm/kvmrc" ] && source "/var/tmp/one/etc/vmm/kvm/kvmrc" || source "/var/tmp/one/vmm/kvm/kvmrc"
+	while read -u 4 out; do
+        logger -t vmm_sp_snapshot_revert_r "virsh: \$out"
+    done 4< <(virsh --connect \$LIBVIRT_URI destroy "$DOMAIN" 2>&1)
+    logger -t vmm_sp_snapshot_revert_r "virsh destroy $DOMAIN ret:\$?"
+EOF
+)
+    ssh "$VMHOST" "$rCMD" 2>/dev/null >/dev/null
+    splog "VM $VM_ID host:$VMHOST DOMAIN_ID:$DOMAIN destroyed"
+    sleep .5
+
+    SP_TMP="SPTMP-$(date +%s)-$(mktemp --dry-run XXXXXXXX)"
+    declare -a tmpVolumes snapList
+    while read snap; do
+        snapList+=("$snap")
+    done < <(storpoolRetry -j snapshot list | jq -r --arg snp "$SNAP_ID" '.data|map(select(.name|contains($snp)))[]|[.name][]')
+    splog "snapList: ${snapList[@]}"
+    finish=1
+    for snap in ${snapList[@]}; do
+        tb=$(date +%s%N)
+        splog "BEGIN snapshot $snap ($tb)"
+        volume="${snap%-$SNAP_ID}"
+        [ "${volume%-iso}" = "$volume" ] && mode="rw" || mode="ro"
+        storpoolVolumeDetach "$volume" "force" "$VMHOST" "all"
+        storpoolVolumeInfo "$volume"
+        OLD_SIZE_M=$((V_SIZE/1024/1024))
+        if [ "$V_TYPE" = "CDROM"  ]; then
+            mode="ro"
+        fi
+        tmpVolume="${volume}-${SP_TMP}"
+        storpoolRetry volume "$volume" rename "$tmpVolume" >/dev/null || finish=0
+        storpoolSnapshotClone "$snap" "$volume" "$V_TEMPLATE_NAME" || finish=0
+        storpoolVolumeInfo "$volume"
+        NEW_SIZE_M=$((V_SIZE/1024/1024))
+        if [ $OLD_SIZE_M -ne $NEW_SIZE_M ]; then
+            if boolTrue "UPDATE_ONE_DISK_SIZE"; then
+                if [ -n "${vmVolumesMap["$volume"]}" ]; then
+                    DISK_ID="${vmVolumesMap[$volume]}"
+                    onedb change-body vm --id $VM_ID "/VM/TEMPLATE/DISK[DISK_ID=$DISK_ID]/SIZE" $NEW_SIZE_M
+                    splog "onedb change VM_ID:$VM_ID DISK_ID:$DISK_ID SIZE:$NEW_SIZE_M (OLD_SIZE:$OLD_SIZE_M)($?)"
+                else
+                    splog "vmVolumesMap[$volume] not found"
+                fi
+            elif [ $OLD_SIZE_M -gt $NEW_SIZE_M ]; then
+                splog "VM volume is +$((OLD_SIZE_M - NEW_SIZE_M))MB than snapshot. Inflating..."
+                storpoolVolumeResize "$volume" "${OLD_SIZE_M}M"
+            fi
+        else
+            splog "$tmpVolume=$OLD_SIZE_M $volume=$NEW_SIZE_M"
+        fi
+        storpoolVolumeAttach "$volume" "$VMHOST" "$mode"
+        tmpVolumes+=("$tmpVolume")
+        te=$(date +%s%N)
+        splog "END snapshot $snap ($te dt:$((te-tb)))"
+    done
+    if boolTrue "finish"; then
+        for volume in ${tmpVolumes[@]}; do
+            storpoolVolumeDelete "$volume" "force" "snaps"
+        done
+    fi
+    splog "END VM_ID=$VM_ID VMHOST=$VMHOST SNAP_ID=$SNAP_ID"
+    exit 0
+else
+    splog "[CONTINUE]"
+fi

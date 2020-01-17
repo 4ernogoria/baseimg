@@ -1,0 +1,144 @@
+#!/bin/bash
+#
+
+# -------------------------------------------------------------------------- #
+# Copyright 2015-2020, StorPool (storpool.com)                               #
+#                                                                            #
+# Licensed under the Apache License, Version 2.0 (the "License"); you may    #
+# not use this file except in compliance with the License. You may obtain    #
+# a copy of the License at                                                   #
+#                                                                            #
+# http://www.apache.org/licenses/LICENSE-2.0                                 #
+#                                                                            #
+# Unless required by applicable law or agreed to in writing, software        #
+# distributed under the License is distributed on an "AS IS" BASIS,          #
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   #
+# See the License for the specific language governing permissions and        #
+# limitations under the License.                                             #
+#--------------------------------------------------------------------------- #
+
+function splog() { logger -t "tm_sp_${0##*/}[$$]" "$*"; }
+
+DRV_ACTION="$1"
+DS_ID="$2"
+
+DRIVER_PATH="${0%/*}"
+SP_JSON_PATH="/tmp"
+SP_FE_JSON_PATH="/tmp/monitor"
+SP_TEMPLATE_STATUS_JSON="storpool_template_status.json"
+SP_CMD_TEMPLATE_STATUS="cat _SP_JSON_PATH_/_SP_TEMPLATE_STATUS_JSON_"
+SP_CMD_TEMPLATE_STATUS_IMAGE="cat _SP_FE_JSON_PATH_/_CLUSTER_ID_/_SP_TEMPLATE_STATUS_JSON_"
+# alternate calculation of the Free space
+ALT_STATS=
+
+if [ -f "${DRIVER_PATH}/../../addon-storpoolrc" ]; then
+    source "${DRIVER_PATH}/../../addon-storpoolrc"
+fi
+if [ -f "/etc/storpool/addon-storpool.conf" ]; then
+    source "/etc/storpool/addon-storpool.conf"
+fi
+
+DS_NAME="${ONE_PX:-one}-ds-$DS_ID"
+
+function boolTrue()
+{
+   case "${!1^^}" in
+       1|Y|YES|TRUE|ON)
+           return 0
+           ;;
+       *)
+           return 1
+   esac
+}
+
+if boolTrue "DEBUG_TM_MONITOR"; then
+	splog "$PWD datastore $DS_ID ${DRV_ACTION:0:6}"
+	export DEBUG_TM_MONITOR_DS=1
+fi
+
+if [ "${DRV_ACTION:0:6}" = "system" ]; then
+	SP_CMD_TEMPLATE_STATUS="${SP_CMD_TEMPLATE_STATUS_SYSTEM:-$SP_CMD_TEMPLATE_STATUS}"
+	if [ -f "${SP_JSON_PATH}/${SP_TEMPLATE_STATUS_JSON}" ]; then
+		:
+	else
+		echo "{[]}" >"${SP_JSON_PATH}/${SP_TEMPLATE_STATUS_JSON}"
+		splog "${SP_JSON_PATH}/${SP_TEMPLATE_STATUS_JSON} not found. Created empty one."
+	fi
+#	echo "cd $PWD && bash -x $PWD/$0 $*" >/tmp/monitor_system.sh
+else
+	source "${DRIVER_PATH}/../../tm/storpool/storpool_common.sh"
+	oneDsDriverAction "${DRIVER_PATH}"
+	#echo "cd $PWD && bash -x $0 $*" >/tmp/monitor-${DS_ID}-${CLUSTER_ID}.sh
+	SP_CMD_TEMPLATE_STATUS="${SP_CMD_TEMPLATE_STATUS_IMAGE:-$SP_CMD_TEMPLATE_STATUS}"
+	if [ -n "$CLUSTERS_ID" ]; then
+		CLUSTERS_ID_ARRAY=($CLUSTERS_ID)
+		export CLUSTER_ID="${CLUSTERS_ID_ARRAY[0]}"
+	fi
+fi # DRV_ACTION
+
+# expand the template variables
+SP_CMD_TEMPLATE_STATUS="${SP_CMD_TEMPLATE_STATUS//_SP_TEMPLATE_STATUS_JSON_/$SP_TEMPLATE_STATUS_JSON}"
+SP_CMD_TEMPLATE_STATUS="${SP_CMD_TEMPLATE_STATUS//_DATASTORE_ID_/$DS_ID}"
+SP_CMD_TEMPLATE_STATUS="${SP_CMD_TEMPLATE_STATUS//_CLUSTER_ID_/$CLUSTER_ID}"
+SP_CMD_TEMPLATE_STATUS="${SP_CMD_TEMPLATE_STATUS//_SP_API_HTTP_HOST_/$SP_API_HTTP_HOST}"
+SP_CMD_TEMPLATE_STATUS="${SP_CMD_TEMPLATE_STATUS//_SP_JSON_PATH_/$SP_JSON_PATH}"
+SP_CMD_TEMPLATE_STATUS="${SP_CMD_TEMPLATE_STATUS//_SP_FE_JSON_PATH_/$SP_FE_JSON_PATH}"
+SP_CMD_TEMPLATE_STATUS="${SP_CMD_TEMPLATE_STATUS//_SP_TEMPLATE_STATUS_JSON_/$SP_TEMPLATE_STATUS_JSON}"
+
+#if boolTrue "DEBUG_TM_MONITOR"; then
+#	splog "SP_CMD_TEMPLATE_STATUS:$SP_CMD_TEMPLATE_STATUS"
+#fi
+
+while IFS=',' read n t f u2 u3; do
+	if [ "${n//\"/}" = "$DS_NAME" ]; then
+		if boolTrue "ALT_STATS"; then
+			f=$(( f + u2 + u3 ))
+		fi
+		u=$(( t - f ))
+		case "${DRV_ACTION:0:6}" in
+			system)
+				echo $((u/1024/1024)) $((t/1024/1024)) $((f/1024/1024))
+				DS_TYPE="SYSTEM"
+				;;
+			*)
+				echo "USED_MB=$((u/1024/1024))"
+				echo "TOTAL_MB=$((t/1024/1024))"
+				echo "FREE_MB=$((f/1024/1024))"
+				DS_TYPE="IMAGE"
+				;;
+		esac
+		if boolTrue "DEBUG_TM_MONITOR"; then
+			splog "${DS_TYPE}_DS ID:$DS_ID u:$((u/1024/1024)) t:$((t/1024/1024)) f:$((f/1024/1024))"
+		fi
+		break
+	fi
+done < <(eval $SP_CMD_TEMPLATE_STATUS 2>/dev/null | jq -r '.data|map(select(.name))|.[]|[.name,.stored.capacity,.stored.free,.stored.internal.u2,.stored.internal.u3]|@csv')
+
+if [ -d "$(readlink -f $BASE_PATH)" ]; then
+	if [ -f "$BASE_PATH/.monitor" ]; then
+		if boolTrue "DEBUG_TM_MONITOR"; then
+			test -f "$BASE_PATH/.monitor" && DS_DRIVER="$(<"$BASE_PATH/.monitor")" || DS_DRIVER="storpool"
+			splog "$DS_ID is marked for remote monitoring via IM_MAD using 'tm/$DS_DRIVER/monitor_ds'"
+		fi
+		exit 0
+	fi
+	if boolTrue "DEBUG_TM_MONITOR"; then
+		splog "run $DRIVER_PATH/monitor_ds $BASE_PATH"
+	fi
+	"$DRIVER_PATH/monitor_ds" "$BASE_PATH"
+else
+	if [ -n "$BASE_PATH" ]; then
+		if [ ! -L "$BASE_PATH" ]; then
+			mkdir -p "$BASE_PATH"
+			splog "mkdir -p $BASE_PATH ($?)"
+		else
+			if boolTrue "DEBUG_TM_MONITOR_VERBOSE"; then
+				splog "BASE_PATH:$BASE_PATH is symlink"
+			fi
+		fi
+	else
+		splog "BASE_PATH variable is empty!"
+	fi
+fi
+
+exit 0
